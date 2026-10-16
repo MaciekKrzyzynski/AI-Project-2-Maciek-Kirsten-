@@ -29,6 +29,9 @@ func get_pos(id: String) -> Vector3:
 		return (nodes[id] as NavNode).pos
 	return Vector3.ZERO
 
+func has_node(id: String) -> bool:
+	return nodes.has(id)
+
 func find_path(start_id: String, goal_id: String) -> Array:
 	if not nodes.has(start_id) or not nodes.has(goal_id):
 		return []
