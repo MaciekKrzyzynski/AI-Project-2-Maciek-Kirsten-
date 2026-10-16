@@ -1,13 +1,13 @@
 extends Node3D
 
 const HumanoidScript := preload("res://scripts/Humanoid.gd")
+const TruckScript    := preload("res://scripts/Truck.gd")
 const CameraControllerScript := preload("res://scripts/CameraController.gd")
 
 var funds: int = 80000
 var supplies: int = 150
 const MAX_SUPPLIES: int = 400
 
-# ---- Building bounds (wider, more irregular) ----
 const BX_MIN := -44.0
 const BX_MAX :=  44.0
 const BZ_MIN := -28.0
@@ -16,22 +16,8 @@ const WALL_T := 0.4
 const WALL_H := 6.0
 const DOOR_W := 3.0
 
-# ============================================================
-# HOSPITAL LAYOUT
-# ============================================================
-# The hospital has 3 main zones:
-#   SOUTH WING  (z ∈ [-28, -8]) : entrance, reception, waiting, ER, triage
-#   CENTRAL SPINE (z ∈ [-8, 8]) : main corridor running E-W, plus the two
-#                                side corridors that bend north and south
-#   NORTH WING  (z ∈ [8, 28])  : wards, ICU, surgery, imaging, pharmacy,
-#                                staff areas
-#
-# There is a main east-west corridor at z = -4 (connects entrance to both wings)
-# plus a loop corridor at z = +14 that runs E-W behind the wards.
-
-# Wards are on the outer wings; each ward is roughly 16×14.
 const ROOMS := [
-	# --- SOUTH WING (below main corridor) ---
+	# --- SOUTH WING ---
 	{ "name": "Reception",  "x_min": -22.0, "x_max":  -6.0, "z_min": -24.0, "z_max": -14.0, "kind": "reception" },
 	{ "name": "Waiting",    "x_min":   6.0, "x_max":  22.0, "z_min": -24.0, "z_max": -14.0, "kind": "waiting" },
 	{ "name": "Triage",     "x_min": -40.0, "x_max": -22.0, "z_min": -24.0, "z_max": -14.0, "kind": "triage" },
@@ -39,47 +25,31 @@ const ROOMS := [
 	{ "name": "ER",         "x_min": -22.0, "x_max":  -6.0, "z_min": -14.0, "z_max":  -8.0, "kind": "er" },
 	{ "name": "Radiology",  "x_min":   6.0, "x_max":  22.0, "z_min": -14.0, "z_max":  -8.0, "kind": "imaging" },
 
-	# --- WEST WING (upper-left of main corridor) ---
+	# --- WEST WING ---
 	{ "name": "Ward_A",     "x_min": -40.0, "x_max": -24.0, "z_min":  -8.0, "z_max":   4.0, "kind": "ward" },
 	{ "name": "Ward_B",     "x_min": -40.0, "x_max": -24.0, "z_min":   4.0, "z_max":  16.0, "kind": "ward" },
 	{ "name": "Storage",    "x_min": -24.0, "x_max": -14.0, "z_min":   2.0, "z_max":  10.0, "kind": "storage" },
 	{ "name": "Staff",      "x_min": -24.0, "x_max": -14.0, "z_min":  10.0, "z_max":  18.0, "kind": "staff" },
 
-	# --- EAST WING (upper-right of main corridor) ---
+	# --- EAST WING ---
 	{ "name": "Ward_C",     "x_min":  24.0, "x_max":  40.0, "z_min":  -8.0, "z_max":   4.0, "kind": "ward" },
 	{ "name": "Ward_D",     "x_min":  24.0, "x_max":  40.0, "z_min":   4.0, "z_max":  16.0, "kind": "ward" },
 	{ "name": "Depot",      "x_min":  14.0, "x_max":  24.0, "z_min":   2.0, "z_max":  10.0, "kind": "depot" },
 	{ "name": "Cafeteria",  "x_min":  14.0, "x_max":  24.0, "z_min":  10.0, "z_max":  18.0, "kind": "cafe" },
 
-	# --- NORTH WING (behind the loop corridor) ---
+	# --- NORTH WING ---
 	{ "name": "ICU",        "x_min": -14.0, "x_max":   0.0, "z_min":  18.0, "z_max":  28.0, "kind": "icu" },
 	{ "name": "Surgery",    "x_min":   0.0, "x_max":  14.0, "z_min":  18.0, "z_max":  28.0, "kind": "surgery" },
 	{ "name": "Recovery",   "x_min": -30.0, "x_max": -14.0, "z_min":  18.0, "z_max":  28.0, "kind": "ward" },
 	{ "name": "Oncology",   "x_min":  14.0, "x_max":  30.0, "z_min":  18.0, "z_max":  28.0, "kind": "ward" },
 ]
 
-# Corridor definition: a list of connected corridor "cells" that NPCs can
-# walk through. Each is a rectangle of free floor between rooms.
-# Main E-W corridor at z = -11 (runs the full width)
-# Central spine N-S at x = 0 (connects main corridor to north loop)
-# North loop at z = 14 (runs E-W)
 const CORRIDORS := [
-	# Entrance corridor (in front of entrance, z = -27 to -24)
 	{ "x_min": -3.0, "x_max": 3.0, "z_min": -28.0, "z_max": -14.0, "name": "entry" },
-
-	# Main E-W corridor at z = -11
 	{ "x_min": -40.0, "x_max": 40.0, "z_min": -13.0, "z_max": -9.0, "name": "main_w" },
-
-	# Central N-S spine at x = 0 (from main corridor up to north loop)
 	{ "x_min": -3.0, "x_max": 3.0, "z_min":  -9.0, "z_max": 14.0, "name": "spine" },
-
-	# North loop at z = 14
 	{ "x_min": -30.0, "x_max": 30.0, "z_min": 12.0, "z_max": 16.0, "name": "loop" },
-
-	# West stub: connects the main corridor to Storage/Staff
 	{ "x_min": -24.0, "x_max": -14.0, "z_min":  0.0, "z_max":  2.0, "name": "west_stub" },
-
-	# East stub: connects the main corridor to Depot/Cafeteria
 	{ "x_min":  14.0, "x_max":  24.0, "z_min":  0.0, "z_max":  2.0, "name": "east_stub" },
 ]
 
@@ -98,6 +68,7 @@ const ENTRANCE_CLOSED_X := 1.2
 
 var patients: Array = []
 var staff: Array = []
+var truck: Node3D = null
 
 var population_clock: float = 0.0
 const POPULATION_INTERVAL := 3.5
@@ -208,35 +179,29 @@ func _setup_camera() -> void:
 func _build_nav_graph() -> void:
 	nav = NavGraph.new()
 
-	# --- Entrance chain ---
 	nav.add_node("entrance_out",  Vector3(  0.0, 0.5, -34.0))
 	nav.add_node("entrance_in",   Vector3(  0.0, 0.5, -28.5))
 	nav.add_node("entry_hall",    Vector3(  0.0, 0.5, -20.0))
 
-	# --- Main E-W corridor nodes ---
 	nav.add_node("corr_mw_w",  Vector3(-32.0, 0.5, -11.0))
 	nav.add_node("corr_mw_cw", Vector3(-16.0, 0.5, -11.0))
 	nav.add_node("corr_mw_c",  Vector3(  0.0, 0.5, -11.0))
 	nav.add_node("corr_mw_ce", Vector3( 16.0, 0.5, -11.0))
 	nav.add_node("corr_mw_e",  Vector3( 32.0, 0.5, -11.0))
 
-	# --- Central N-S spine ---
 	nav.add_node("corr_sp_1", Vector3(0.0, 0.5,  -4.0))
 	nav.add_node("corr_sp_2", Vector3(0.0, 0.5,   3.0))
 	nav.add_node("corr_sp_3", Vector3(0.0, 0.5,  10.0))
 
-	# --- North loop nodes ---
 	nav.add_node("corr_loop_w",  Vector3(-24.0, 0.5, 14.0))
 	nav.add_node("corr_loop_cw", Vector3(-10.0, 0.5, 14.0))
 	nav.add_node("corr_loop_c",  Vector3(  0.0, 0.5, 14.0))
 	nav.add_node("corr_loop_ce", Vector3( 10.0, 0.5, 14.0))
 	nav.add_node("corr_loop_e",  Vector3( 24.0, 0.5, 14.0))
 
-	# --- Side stubs to mid rooms ---
 	nav.add_node("corr_ws", Vector3(-19.0, 0.5, 1.0))
 	nav.add_node("corr_es", Vector3( 19.0, 0.5, 1.0))
 
-	# --- Room door + center nodes ---
 	for room in ROOMS:
 		var x_min: float = float(room["x_min"])
 		var x_max: float = float(room["x_max"])
@@ -245,20 +210,14 @@ func _build_nav_graph() -> void:
 		var name: String = str(room["name"])
 		var cx: float = (x_min + x_max) * 0.5
 		var cz: float = (z_min + z_max) * 0.5
-
-		# Door node: place on the room edge that faces the nearest corridor.
-		# We compute the nearest point on any corridor rect boundary and
-		# put the door there.
 		var door_pos := _nearest_corridor_edge(Vector3(cx, 0.5, cz), room)
 		nav.add_node("door_" + name, door_pos)
 		nav.add_node("room_" + name, Vector3(cx, 0.5, cz))
 
-	# --- Bed nodes ---
 	for i in range(bed_positions.size()):
 		var bp: Vector3 = bed_positions[i]
 		nav.add_node("bed_%d" % i, Vector3(bp.x, 0.5, bp.z + 1.6))
 
-	# --- EDGES ---
 	nav.link("entrance_out", "entrance_in")
 	nav.link("entrance_in",  "entry_hall")
 	nav.link("entry_hall",   "corr_mw_c")
@@ -283,13 +242,11 @@ func _build_nav_graph() -> void:
 	nav.link("corr_mw_ce", "corr_es")
 	nav.link("corr_es",    "corr_sp_2")
 
-	# Link each room's door to the nearest corridor node, and door to room
 	for room in ROOMS:
 		var name: String = str(room["name"])
 		var door_id := "door_" + name
 		var door_pos: Vector3 = nav.get_pos(door_id)
 
-		# Find nearest corridor node
 		var nearest := "corr_mw_c"
 		var best := 99999.0
 		for cid in ["corr_mw_w","corr_mw_cw","corr_mw_c","corr_mw_ce","corr_mw_e",
@@ -304,13 +261,9 @@ func _build_nav_graph() -> void:
 		nav.link(nearest, door_id)
 		nav.link(door_id, "room_" + name)
 
-	# Link beds to their rooms
 	for i in range(bed_positions.size()):
 		nav.link("room_" + bed_wards[i], "bed_%d" % i)
 
-# Given a room rect and a reference point (room center), find the point on
-# the room's boundary that is closest to the corridor network and use it as
-# the door position.
 func _nearest_corridor_edge(_ref: Vector3, room: Dictionary) -> Vector3:
 	var x_min: float = float(room["x_min"])
 	var x_max: float = float(room["x_max"])
@@ -319,14 +272,11 @@ func _nearest_corridor_edge(_ref: Vector3, room: Dictionary) -> Vector3:
 	var cx: float = (x_min + x_max) * 0.5
 	var cz: float = (z_min + z_max) * 0.5
 
-	# Pick the room edge that faces a corridor.
-	# South edge faces z_min, north edge faces z_max, west x_min, east x_max.
-	# We score each edge by how close its midpoint is to a corridor node.
 	var candidates: Array = [
-		{ "pos": Vector3(cx, 0.5, z_min - 0.2), "axis": "S" },
-		{ "pos": Vector3(cx, 0.5, z_max + 0.2), "axis": "N" },
-		{ "pos": Vector3(x_min - 0.2, 0.5, cz), "axis": "W" },
-		{ "pos": Vector3(x_max + 0.2, 0.5, cz), "axis": "E" },
+		{ "pos": Vector3(cx, 0.5, z_min - 0.2) },
+		{ "pos": Vector3(cx, 0.5, z_max + 0.2) },
+		{ "pos": Vector3(x_min - 0.2, 0.5, cz) },
+		{ "pos": Vector3(x_max + 0.2, 0.5, cz) },
 	]
 
 	var best_pos: Vector3 = candidates[0]["pos"]
@@ -340,7 +290,6 @@ func _nearest_corridor_edge(_ref: Vector3, room: Dictionary) -> Vector3:
 	return best_pos
 
 func _distance_to_any_corridor(p: Vector3) -> float:
-	# Distance from p to the closest corridor centerline as a rough heuristic
 	var pts := [
 		Vector3(  0.0, 0.5, -20.0),
 		Vector3(-32.0, 0.5, -11.0), Vector3(0.0, 0.5, -11.0), Vector3(32.0, 0.5, -11.0),
@@ -408,13 +357,11 @@ func _build_hospital_shell() -> void:
 	_make_box(Vector3(W + 0.4, 0.2, D + 0.4),
 		Vector3(0, 0.1, 0), Color(0.9, 0.92, 0.94), "HospitalFloor")
 
-	# Semi-transparent roof
 	hospital_roof = _make_box_transparent(
 		Vector3(W + 0.8, 0.3, D + 0.8),
 		Vector3(0, WALL_H + 0.15, 0),
 		Color(0.55, 0.57, 0.6), 0.22, "HospitalRoof")
 
-	# Exterior walls with entrance gap at x ∈ [-2, 2] on south side
 	var s_z := BZ_MIN - WALL_T * 0.5
 	_make_box(Vector3((-2.0) - BX_MIN, WALL_H, WALL_T),
 		Vector3((BX_MIN + (-2.0)) * 0.5, WALL_H * 0.5, s_z),
@@ -443,7 +390,6 @@ func _build_hospital_shell() -> void:
 		Vector3(e_x, WALL_H * 0.5, 0), Color(0.92, 0.9, 0.86), "Wall_East")
 	_register_wall(Rect2(BX_MAX, BZ_MIN, WALL_T, D))
 
-	# Windows on the exterior
 	for x in [-36.0, -20.0, 20.0, 36.0]:
 		_build_window(Vector3(x, 3.5, s_z - WALL_T * 0.5 - 0.01), true)
 	for x in [-36.0, -20.0, 0.0, 20.0, 36.0]:
@@ -479,8 +425,6 @@ func _build_window(pos: Vector3, horizontal: bool) -> void:
 # ============================================================
 # ROOM WALLS
 # ============================================================
-# Each room gets 4 walls. Each wall has one doorway if the room's door
-# node sits on that edge.
 func _build_room_walls() -> void:
 	var wall_col := Color(0.88, 0.88, 0.9)
 
@@ -492,14 +436,9 @@ func _build_room_walls() -> void:
 		var name: String = str(room["name"])
 		var door_pos: Vector3 = nav.get_pos("door_" + name)
 
-		# For each wall, compute the door position along that wall (or None)
-		# South wall (z = z_min)
 		var door_on_s := absf(door_pos.z - (z_min - 0.2)) < 0.5
-		# North wall (z = z_max)
 		var door_on_n := absf(door_pos.z - (z_max + 0.2)) < 0.5
-		# West wall (x = x_min)
 		var door_on_w := absf(door_pos.x - (x_min - 0.2)) < 0.5
-		# East wall (x = x_max)
 		var door_on_e := absf(door_pos.x - (x_max + 0.2)) < 0.5
 
 		_build_hwall_with_optional_door(x_min, x_max, z_min, door_on_s, door_pos.x, wall_col, name + "_S")
@@ -518,7 +457,6 @@ func _build_hwall_with_optional_door(x_min: float, x_max: float, z: float,
 		_register_wall(Rect2(x_min, z - WALL_T * 0.5, length, WALL_T))
 		return
 
-	# Wall with door at door_x
 	var door_l := door_x - DOOR_W * 0.5
 	var door_r := door_x + DOOR_W * 0.5
 	if door_l > x_min + 0.05:
@@ -531,7 +469,6 @@ func _build_hwall_with_optional_door(x_min: float, x_max: float, z: float,
 		_make_box(Vector3(len2, WALL_H, WALL_T),
 			Vector3(door_r + len2 * 0.5, WALL_H * 0.5, z), col, tag + "_R")
 		_register_wall(Rect2(door_r, z - WALL_T * 0.5, len2, WALL_T))
-	# Lintel
 	_make_box(Vector3(DOOR_W, WALL_H - 2.4, WALL_T),
 		Vector3(door_x, 2.4 + (WALL_H - 2.4) * 0.5, z), col, tag + "_Lintel")
 
@@ -558,7 +495,6 @@ func _build_vwall_with_optional_door(z_min: float, z_max: float, x: float,
 		_make_box(Vector3(WALL_T, WALL_H, len2),
 			Vector3(x, WALL_H * 0.5, door_r + len2 * 0.5), col, tag + "_N")
 		_register_wall(Rect2(x - WALL_T * 0.5, door_r, WALL_T, len2))
-	# Lintel
 	_make_box(Vector3(WALL_T, WALL_H - 2.4, DOOR_W),
 		Vector3(x, 2.4 + (WALL_H - 2.4) * 0.5, door_z), col, tag + "_Lintel")
 
@@ -573,7 +509,6 @@ func _build_reception() -> void:
 	_make_box(Vector3(0.7, 0.55, 0.1), Vector3(-4.0, 1.55, -20.2),
 		Color(0.05, 0.05, 0.08), "Monitor")
 
-	# Waiting chairs on the east side
 	var chair_col := Color(0.15, 0.4, 0.7)
 	for row in range(3):
 		for col in range(3):
@@ -668,8 +603,6 @@ func _build_room_props() -> void:
 			"triage":
 				_make_box(Vector3(6.0, 0.1, 2.0), Vector3(cx, 0.9, cz),
 					Color(0.5, 0.55, 0.6), "TriageDesk")
-				_make_box(Vector3(6.0, 0.5, 0.2), Vector3(cx, 0.6, cz - 0.9),
-					Color(0.35, 0.4, 0.5), "TriageFront")
 			"reception":
 				_make_box(Vector3(6.0, 0.1, 2.0), Vector3(cx, 0.9, cz),
 					Color(0.45, 0.3, 0.15), "RecDesk")
@@ -881,10 +814,19 @@ func unregister_patient(p: Node) -> void:
 	patients.erase(p)
 
 func _on_order_supplies() -> void:
-	if funds < 3500:
+	if funds < 3500 or truck != null:
 		return
 	funds -= 3500
-	supplies = min(supplies + 100, MAX_SUPPLIES)
+	var t := Node3D.new()
+	t.set_script(TruckScript)
+	t.configure(self)
+	add_child(t)
+	truck = t
+	_update_hud()
+
+func deliver_supplies(amount: int) -> void:
+	supplies = min(supplies + amount, MAX_SUPPLIES)
+	truck = null
 	_update_hud()
 
 func _on_recruit_staff() -> void:
