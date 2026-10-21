@@ -17,28 +17,23 @@ var yaw: float = 0.0
 
 var waypoints: Array[Vector3] = []
 var current_wp: int = 1
+var cargo: Dictionary = {}
 
-func configure(p_game: Node) -> void:
+func configure(p_game: Node, p_cargo: Dictionary) -> void:
 	game = p_game
+	cargo = p_cargo
 
 func _ready() -> void:
-	# Route entirely along the driveway, SOUTH of the building.
-	# Building occupies z ∈ [-28, 28]; all waypoints stay at z ≤ -34.
 	waypoints = [
-		Vector3(-60.0, 0.16, -70.0),
-		Vector3(  0.0, 0.16, -70.0),
-		Vector3(  0.0, 0.16, -50.0),
-		Vector3(  0.0, 0.16, -34.0),
+		Vector3(-60.0, 0.16, -70.0), Vector3(0.0, 0.16, -70.0),
+		Vector3(0.0, 0.16, -50.0),   Vector3(0.0, 0.16, -34.0),
 	]
 	current_wp = 1
 	position = waypoints[0]
 	prev_pos = position
 	yaw = _yaw_to(position, waypoints[current_wp])
 	rotation.y = yaw
-
-	body = Node3D.new()
-	body.name = "Body"
-	add_child(body)
+	body = Node3D.new(); body.name = "Body"; add_child(body)
 	_build_truck()
 
 func _build_truck() -> void:
@@ -46,78 +41,43 @@ func _build_truck() -> void:
 	_add_box(Vector3(2.55, 1.2, 3.0), Vector3(0, 1.4, 0), Color(0.85, 0.1, 0.1), "TrailerStripe")
 	_add_box(Vector3(2.4, 1.9, 2.0), Vector3(0, 1.1, 3.8), Color(0.15, 0.15, 0.18), "Cab")
 	_add_box(Vector3(2.1, 0.7, 0.08), Vector3(0, 1.6, 4.85), Color(0.35, 0.55, 0.7), "Windshield")
-	_add_box(Vector3(1.4, 0.18, 0.3), Vector3(0, 2.15, 3.6), Color(0.1, 0.1, 0.12), "LightBar")
-
-	var wheel_positions: Array[Vector3] = [
-		Vector3(-1.3, 0.48, 2.0), Vector3(1.3, 0.48, 2.0),
-		Vector3(-1.3, 0.48, -2.0), Vector3(1.3, 0.48, -2.0),
-	]
-	for wp in wheel_positions:
-		var pivot := Node3D.new()
-		pivot.position = wp
-		body.add_child(pivot)
+	for wp in [Vector3(-1.3, 0.48, 2.0), Vector3(1.3, 0.48, 2.0),
+			   Vector3(-1.3, 0.48, -2.0), Vector3(1.3, 0.48, -2.0)]:
+		var pivot := Node3D.new(); pivot.position = wp; body.add_child(pivot)
 		var w := MeshInstance3D.new()
 		var cyl := CylinderMesh.new()
-		cyl.top_radius = 0.475
-		cyl.bottom_radius = 0.475
-		cyl.height = 0.5
-		w.mesh = cyl
-		w.rotation.z = deg_to_rad(90)
-		var m := StandardMaterial3D.new()
-		m.albedo_color = Color(0.05, 0.05, 0.05)
-		w.material_override = m
-		pivot.add_child(w)
-		wheels.append(pivot)
+		cyl.top_radius = 0.475; cyl.bottom_radius = 0.475; cyl.height = 0.5
+		w.mesh = cyl; w.rotation.z = deg_to_rad(90)
+		var m := StandardMaterial3D.new(); m.albedo_color = Color(0.05, 0.05, 0.05)
+		w.material_override = m; pivot.add_child(w); wheels.append(pivot)
 
 func _add_box(size: Vector3, pos: Vector3, col: Color, node_name: String = "Box") -> MeshInstance3D:
-	var mi := MeshInstance3D.new()
-	mi.name = node_name
-	var box := BoxMesh.new()
-	box.size = size
-	mi.mesh = box
-	mi.position = pos
-	var m := StandardMaterial3D.new()
-	m.albedo_color = col
-	m.roughness = 0.85
-	mi.material_override = m
-	body.add_child(mi)
-	return mi
+	var mi := MeshInstance3D.new(); mi.name = node_name
+	var box := BoxMesh.new(); box.size = size
+	mi.mesh = box; mi.position = pos
+	var m := StandardMaterial3D.new(); m.albedo_color = col; m.roughness = 0.85
+	mi.material_override = m; body.add_child(mi); return mi
 
 func _yaw_to(from: Vector3, to: Vector3) -> float:
-	var d := to - from
-	d.y = 0
-	if d.length_squared() < 0.0001:
-		return yaw
+	var d := to - from; d.y = 0
+	if d.length_squared() < 0.0001: return yaw
 	return atan2(d.x, d.z)
 
 func _process(delta: float) -> void:
 	if current_wp >= waypoints.size():
-		game.deliver_supplies(100)
-		queue_free()
-		return
-
+		game.deliver_supplies(cargo); queue_free(); return
 	var target := waypoints[current_wp]
-	var desired_yaw := _yaw_to(position, target)
-	yaw = lerp_angle(yaw, desired_yaw, TURN_LERP)
+	yaw = lerp_angle(yaw, _yaw_to(position, target), TURN_LERP)
 	rotation.y = yaw
-
-	var frame_delta := position - prev_pos
+	var fd := position - prev_pos
 	prev_pos = position
-	velocity = frame_delta / max(delta, 0.0001)
-
-	var forward := Vector3(sin(yaw), 0, cos(yaw))
-	position += forward * SPEED * delta
-
-	var forward_speed: float = velocity.dot(forward)
-	var target_pitch: float = clampf(forward_speed * 0.4, -PITCH_MAX, PITCH_MAX)
-	pitch = lerpf(pitch, target_pitch, delta * PITCH_ACCEL)
+	velocity = fd / max(delta, 0.0001)
+	var fwd := Vector3(sin(yaw), 0, cos(yaw))
+	position += fwd * SPEED * delta
+	var fs: float = velocity.dot(fwd)
+	pitch = lerpf(pitch, clampf(fs * 0.4, -PITCH_MAX, PITCH_MAX), delta * PITCH_ACCEL)
 	body.rotation.x = deg_to_rad(pitch)
-
 	bob_time += delta * 14.0
 	body.position.y = sin(bob_time) * 0.02
-
-	for wheel in wheels:
-		wheel.rotation.x += delta * (SPEED * 2.5)
-
-	if position.distance_to(target) < ARRIVE_RADIUS:
-		current_wp += 1
+	for wheel in wheels: wheel.rotation.x += delta * (SPEED * 2.5)
+	if position.distance_to(target) < ARRIVE_RADIUS: current_wp += 1
