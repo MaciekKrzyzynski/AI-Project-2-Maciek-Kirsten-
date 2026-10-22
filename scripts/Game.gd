@@ -58,6 +58,20 @@ const SUPPLY_UNIT_PRICE := {
 }
 const ORDER_BASE_FEE := 500
 
+# Mirror Humanoid.State so Game.gd can reference states by name.
+const S_ARRIVING := 0
+const S_AT_RECEPTION := 1
+const S_GOING_TO_ROOM := 2
+const S_WAITING_FOR_DOCTOR := 3
+const S_RECOVERING := 4
+const S_LEAVING := 5
+const S_WORKING := 6
+const S_TREATING := 7
+
+# First-person physics
+const FP_JUMP_VELOCITY := 6.0
+const FP_GRAVITY := 18.0
+
 var supply_inventory: Dictionary = {
 	"Cast": 20, "Antibiotics": 40, "Antivirals": 30, "Stents": 10,
 	"Clot Busters": 10, "IV Fluids": 50, "Painkillers": 60,
@@ -77,6 +91,8 @@ var entrance_right: MeshInstance3D
 var entrance_open_amount: float = 0.0
 const ENTRANCE_CLOSED_X := 1.2
 
+var roof_mesh: MeshInstance3D
+
 var patients: Array = []
 var staff: Array = []
 var truck: Node3D = null
@@ -94,6 +110,11 @@ var fp_yaw: float = 0.0
 var fp_pitch: float = 0.0
 var fp_speed: float = 8.0
 var mouse_sensitivity: float = 0.15
+var fp_jump_queued: bool = false
+
+# Cached top-down camera transform so we can restore it exactly on exit.
+var top_down_home_position: Vector3 = Vector3(0, 60, -90)
+var top_down_home_rotation: Vector3 = Vector3(-32, 0, 0)
 
 var hud_root: Control
 var funds_value_label: Label
@@ -213,9 +234,12 @@ func _build_scene() -> void:
 	sun.light_energy = 1.15; sun.shadow_enabled = true
 	add_child(sun)
 
+	top_down_home_position = Vector3(0, 60, -90)
+	top_down_home_rotation = Vector3(-32, 0, 0)
+
 	top_down_camera = Camera3D.new()
-	top_down_camera.position = Vector3(0, 60, -90)
-	top_down_camera.rotation_degrees = Vector3(-32, 0, 0)
+	top_down_camera.position = top_down_home_position
+	top_down_camera.rotation_degrees = top_down_home_rotation
 	top_down_camera.fov = 55; top_down_camera.current = true
 	top_down_camera.set_script(CameraControllerScript); add_child(top_down_camera)
 
@@ -238,6 +262,7 @@ func _build_scene() -> void:
 	_build_ground(); _build_roads(); _build_floor_shell()
 	_build_room_walls(); _build_room_props(); _build_beds_floor()
 	_build_reception(); _build_entrance_canopy()
+	_build_roof()
 	_build_hud(); _build_patient_chart(); _build_order_panel()
 
 func _build_ground() -> void:
@@ -343,7 +368,6 @@ func _build_beds_floor() -> void:
 	for i in range(bed_positions.size()):
 		var bp := bed_positions[i]
 		_make_box(Vector3(1.8, 0.4, 3.0), Vector3(bp.x, 0.8, bp.z), Color(0.35, 0.37, 0.4), "BedFrame")
-		_make_wall_phys(Vector3(1.8, 0.4, 3.0), Vector3(bp.x, 0.8, bp.z))
 		_make_box(Vector3(1.7, 0.2, 2.8), Vector3(bp.x, 1.1, bp.z), Color(0.95, 0.96, 0.98), "BedMattress")
 		_make_box(Vector3(1.6, 0.08, 1.3), Vector3(bp.x, 1.2, bp.z + 0.6), Color(0.4, 0.55, 0.75), "BedBlanket")
 
@@ -367,6 +391,16 @@ func _build_room_props() -> void:
 			"surgery":
 				_make_box(Vector3(2.0, 0.9, 4.0), Vector3(cx, 0.45, cz), Color(0.5, 0.55, 0.6), "OR_Table")
 				_make_wall_phys(Vector3(2.0, 0.9, 4.0), Vector3(cx, 0.45, cz))
+
+func _build_roof() -> void:
+	var W := BX_MAX - BX_MIN + WALL_T * 2
+	var D := BZ_MAX - BZ_MIN + WALL_T * 2
+	roof_mesh = _make_box(
+		Vector3(W, 0.3, D),
+		Vector3(0, WALL_H + 0.15, 0),
+		Color(0.35, 0.32, 0.3),
+		"HospitalRoof")
+	roof_mesh.visible = false
 
 func _register_wall(rect: Rect2) -> void: wall_rects.append(rect)
 func _make_wall_phys(size: Vector3, pos: Vector3) -> void:
@@ -417,21 +451,56 @@ func _spawn_humanoid(role: int) -> Node3D:
 
 func _toggle_view() -> void:
 	is_first_person = not is_first_person
+	# Restore the top-down camera exactly to its home transform every time we
+	# leave FP mode. This prevents the camera from being offset by the
+	# CameraControllerScript's accumulated pan/zoom state.
+	if not is_first_person:
+		if top_down_camera:
+			top_down_camera.position = top_down_home_position
+			top_down_camera.rotation_degrees = top_down_home_rotation
+			# Reset any custom state the CameraControllerScript may keep.
+			if top_down_camera.has_method("reset_view"):
+				top_down_camera.reset_view()
 	top_down_camera.current = not is_first_person
 	fp_camera.current = is_first_person
 	Input.set_mouse_mode(Input.MOUSE_MODE_CAPTURED if is_first_person else Input.MOUSE_MODE_VISIBLE)
+	if roof_mesh:
+		roof_mesh.visible = is_first_person
+	# Release any focused button so Space/Enter don't re-trigger it.
+	var focused := get_viewport().gui_get_focus_owner()
+	if focused:
+		focused.release_focus()
 	if is_first_person:
 		fp_controller.position = Vector3(0, 2, -30)
 		fp_yaw = 0.0; fp_pitch = 0.0
+		fp_controller.velocity = Vector3.ZERO
+		fp_jump_queued = false
+		if view_button: view_button.text = "EXIT FIRST PERSON (Q)"
+	else:
+		if view_button: view_button.text = "FIRST PERSON"
 
 func _input(event: InputEvent) -> void:
 	if is_first_person:
+		if event is InputEventKey and event.pressed and not event.echo:
+			if event.keycode == KEY_Q:
+				_toggle_view()
+				get_viewport().set_input_as_handled()
+				return
+			if event.keycode == KEY_SPACE:
+				fp_jump_queued = true
+				get_viewport().set_input_as_handled()
+				return
 		if event is InputEventMouseMotion:
 			fp_yaw -= event.relative.x * mouse_sensitivity
 			fp_pitch -= event.relative.y * mouse_sensitivity
 			fp_pitch = clampf(fp_pitch, -89.0, 89.0)
 			fp_controller.rotation_degrees.y = fp_yaw
 			fp_camera.rotation_degrees.x = fp_pitch
+			return
+		if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT and event.pressed:
+			if chart_shown or order_shown: return
+			_try_click_patient_fp(event.position)
+			return
 		return
 	if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT and event.pressed:
 		if chart_shown or order_shown: return
@@ -440,12 +509,46 @@ func _input(event: InputEvent) -> void:
 		var query = PhysicsRayQueryParameters3D.create(from, to, 2)
 		var result = get_world_3d().direct_space_state.intersect_ray(query)
 		if result and result["collider"].has_meta("disease"):
-			open_patient_chart(result["collider"]); return
+			_toggle_or_open_patient(result["collider"]); return
 		var best: Node = null; var best_d := 2.0
 		for p in patients:
 			var d = _dist_point_ray(p.position + Vector3(0,1,0), from, to)
 			if d < best_d: best_d = d; best = p
-		if best != null: open_patient_chart(best)
+		if best != null: _toggle_or_open_patient(best)
+
+func _try_click_patient_fp(mouse_pos: Vector2) -> void:
+	var from: Vector3 = fp_camera.project_ray_origin(mouse_pos)
+	var to: Vector3 = from + fp_camera.project_ray_normal(mouse_pos) * 30.0
+	var query := PhysicsRayQueryParameters3D.create(from, to, 2)
+	query.collide_with_areas = false
+	var result := get_world_3d().direct_space_state.intersect_ray(query)
+	if result:
+		var collider = result["collider"]
+		if collider is Node and collider.has_meta("disease"):
+			_toggle_or_open_patient(collider)
+			return
+	# Fallback: screen-space pick against patients.
+	var best: Node = null
+	var best_dist := 60.0
+	for p in patients:
+		var pnode: Node3D = p
+		if pnode.position.distance_to(fp_controller.position) > 20.0: continue
+		var world: Vector3 = pnode.position + Vector3(0, 1.2, 0)
+		if fp_camera.is_position_behind(world): continue
+		var screen: Vector2 = fp_camera.unproject_position(world)
+		var d: float = screen.distance_to(mouse_pos)
+		if d < best_dist:
+			best_dist = d
+			best = p
+	if best != null:
+		_toggle_or_open_patient(best)
+
+# If the same patient's chart is already open, close it. Otherwise, open it.
+func _toggle_or_open_patient(patient: Node) -> void:
+	if chart_shown and active_popup_patient == patient:
+		_close_chart()
+		return
+	open_patient_chart(patient)
 
 func _dist_point_ray(p: Vector3, a: Vector3, b: Vector3) -> float:
 	var ab = b - a; var ap = p - a
@@ -561,7 +664,10 @@ func _build_hud() -> void:
 	recruit_button.pressed.connect(_on_recruit_staff); btn_row.add_child(recruit_button)
 	view_button = Button.new(); view_button.text = "FIRST PERSON"
 	view_button.custom_minimum_size = Vector2(220, 55); _style_button(view_button, Color(0.55, 0.35, 0.15), Color(0.75, 0.55, 0.25))
+	view_button.focus_mode = Control.FOCUS_NONE
 	view_button.pressed.connect(_toggle_view); btn_row.add_child(view_button)
+	order_button.focus_mode = Control.FOCUS_NONE
+	recruit_button.focus_mode = Control.FOCUS_NONE
 
 func _style_button(b: Button, base: Color, hover: Color) -> void:
 	var normal := StyleBoxFlat.new(); normal.bg_color = base
@@ -612,6 +718,7 @@ func _build_patient_chart() -> void:
 	ch_health = ProgressBar.new(); ch_health.custom_minimum_size = Vector2(380, 24); ch_health.max_value = 100
 	vbox.add_child(ch_health)
 	var close_btn := Button.new(); close_btn.text = "Close Chart"
+	close_btn.focus_mode = Control.FOCUS_NONE
 	close_btn.pressed.connect(_close_chart); vbox.add_child(close_btn)
 
 func _mk_lbl(parent: Node) -> Label:
@@ -682,11 +789,13 @@ func _build_order_panel() -> void:
 		price_lbl.custom_minimum_size = Vector2(70, 26); price_lbl.add_theme_color_override("font_color", Color(0.4, 0.4, 0.2))
 		row.add_child(price_lbl)
 		var minus_btn := Button.new(); minus_btn.text = "-"; minus_btn.custom_minimum_size = Vector2(30, 26)
+		minus_btn.focus_mode = Control.FOCUS_NONE
 		minus_btn.pressed.connect(_change_order_qty.bind(supply, -1)); row.add_child(minus_btn)
 		var qty_lbl := Label.new(); qty_lbl.text = "0"; qty_lbl.custom_minimum_size = Vector2(36, 26)
 		qty_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER; qty_lbl.add_theme_color_override("font_color", Color(0.1, 0.1, 0.1))
 		row.add_child(qty_lbl)
 		var plus_btn := Button.new(); plus_btn.text = "+"; plus_btn.custom_minimum_size = Vector2(30, 26)
+		plus_btn.focus_mode = Control.FOCUS_NONE
 		plus_btn.pressed.connect(_change_order_qty.bind(supply, 1)); row.add_child(plus_btn)
 		var sub_lbl := Label.new(); sub_lbl.text = "$0"; sub_lbl.custom_minimum_size = Vector2(70, 26)
 		sub_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT; sub_lbl.add_theme_color_override("font_color", Color(0.15, 0.45, 0.15))
@@ -699,8 +808,10 @@ func _build_order_panel() -> void:
 	root.add_child(order_total_label)
 	var btn_row := HBoxContainer.new(); btn_row.add_theme_constant_override("separation", 8); root.add_child(btn_row)
 	var place_btn := Button.new(); place_btn.text = "PLACE ORDER"; place_btn.custom_minimum_size = Vector2(200, 42)
+	place_btn.focus_mode = Control.FOCUS_NONE
 	place_btn.pressed.connect(_place_order); btn_row.add_child(place_btn)
 	var cancel_btn := Button.new(); cancel_btn.text = "Cancel"; cancel_btn.custom_minimum_size = Vector2(200, 42)
+	cancel_btn.focus_mode = Control.FOCUS_NONE
 	cancel_btn.pressed.connect(_close_order_panel); btn_row.add_child(cancel_btn)
 
 func _open_order_panel() -> void:
@@ -761,14 +872,24 @@ func deliver_supplies(cargo: Dictionary) -> void:
 func _process(delta: float) -> void:
 	if is_first_person:
 		var dir := Vector3.ZERO
-		if Input.is_key_pressed(KEY_W): dir += Vector3(sin(deg_to_rad(fp_yaw)), 0, cos(deg_to_rad(fp_yaw)))
-		if Input.is_key_pressed(KEY_S): dir -= Vector3(sin(deg_to_rad(fp_yaw)), 0, cos(deg_to_rad(fp_yaw)))
-		if Input.is_key_pressed(KEY_A): dir -= Vector3(cos(deg_to_rad(fp_yaw)), 0, -sin(deg_to_rad(fp_yaw)))
-		if Input.is_key_pressed(KEY_D): dir += Vector3(cos(deg_to_rad(fp_yaw)), 0, -sin(deg_to_rad(fp_yaw)))
+		var yaw_rad := deg_to_rad(fp_yaw)
+		var forward := Vector3(-sin(yaw_rad), 0, -cos(yaw_rad))
+		var right   := Vector3( cos(yaw_rad), 0, -sin(yaw_rad))
+		if Input.is_key_pressed(KEY_W): dir += forward
+		if Input.is_key_pressed(KEY_S): dir -= forward
+		if Input.is_key_pressed(KEY_D): dir += right
+		if Input.is_key_pressed(KEY_A): dir -= right
+		if dir.length_squared() > 0.0: dir = dir.normalized()
 		fp_controller.velocity.x = dir.x * fp_speed
 		fp_controller.velocity.z = dir.z * fp_speed
-		if not fp_controller.is_on_floor(): fp_controller.velocity.y -= 9.8 * delta
-		else: fp_controller.velocity.y = 0
+		if not fp_controller.is_on_floor():
+			fp_controller.velocity.y -= FP_GRAVITY * delta
+		elif fp_jump_queued:
+			fp_controller.velocity.y = FP_JUMP_VELOCITY
+			fp_jump_queued = false
+		else:
+			fp_controller.velocity.y = 0
+		fp_jump_queued = false
 		fp_controller.move_and_slide()
 
 	var ct = 1.0 if chart_shown else 0.0
@@ -788,14 +909,17 @@ func _process(delta: float) -> void:
 
 	for i in range(patients.size()):
 		var p = patients[i]
-		if p.state == 3:
+
+		if p.state == S_WAITING_FOR_DOCTOR:
 			for d in staff:
-				if d.role == 1 and d.state != 4:
-					d.state = 4; d.treating_patient = p
-					d.position = p.position + Vector3(1.4, 0, 0)
-					p.state = 5; break
-		if p.state == 5:
-			var prog: float = p.get_meta("progress") + delta * 8.0
+				if d.role in [1, 2] and d.state == S_WORKING:
+					d.state = S_TREATING
+					d.treating_patient = p
+					p.state = S_RECOVERING
+					break
+
+		if p.state == S_RECOVERING:
+			var prog: float = float(p.get_meta("progress")) + delta * 8.0
 			p.set_meta("progress", prog)
 			p.update_health_bar(prog)
 			if active_popup_patient == p: ch_health.value = prog
@@ -805,10 +929,12 @@ func _process(delta: float) -> void:
 				funds += 4500
 				bed_occupied[p.bed_index] = false
 				occupied_beds = max(0, occupied_beds - 1)
-				p.state = 6; p._request_path_to_node("entrance_out"); p.update_health_bar(0)
+				p.state = S_LEAVING
 				for d in staff:
-					if d.state == 4 and d.treating_patient == p:
-						d.state = 7; d.treating_patient = null; d.work_timer = 0.0
+					if d.state == S_TREATING and d.treating_patient == p:
+						d.state = S_WORKING
+						d.treating_patient = null
+						d.work_timer = 0.0
 				if active_popup_patient == p: _close_chart()
 				_update_hud()
 
@@ -832,7 +958,7 @@ func get_bed_position(idx: int) -> Vector3:
 
 func get_patient_needing_doctor():
 	for p in patients:
-		if p.state == 3: return p
+		if p.state == S_WAITING_FOR_DOCTOR: return p
 	return null
 
 func unregister_patient(p: Node) -> void: patients.erase(p)

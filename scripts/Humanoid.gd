@@ -18,6 +18,7 @@ var current_yaw: float = 0.0
 const TURN_LERP := 0.2
 var stuck_timer: float = 0.0
 var last_pos: Vector3 = Vector3.ZERO
+var blocked_time: float = 0.0
 
 var game: Node = null
 
@@ -40,7 +41,12 @@ const WALK_SPEED := 4.0
 const WORK_SPEED := 3.2
 const ARRIVE_DIST := 0.6
 const STUCK_TIMEOUT := 2.5
+const BLOCKED_TELEPORT_TIME := 6.0
 const GROUND_Y := 0.22
+const BED_SURFACE_Y := 1.2
+const BED_LIE_Y := BED_SURFACE_Y + 0.3
+const HEALTH_BAR_HEIGHT := 2.3
+const HEAL_ATTEND_THRESHOLD := 50.0
 
 func configure(p_role: int, p_game: Node) -> void:
 	role = p_role
@@ -100,23 +106,22 @@ func _build_body() -> void:
 
 func _build_health_bar() -> void:
 	health_bar_bg = MeshInstance3D.new()
-	var bg_mesh := QuadMesh.new(); bg_mesh.size = Vector2(1.0, 0.14)
+	var bg_mesh := QuadMesh.new(); bg_mesh.size = Vector2(1.1, 0.18)
 	health_bar_bg.mesh = bg_mesh
-	health_bar_bg.position = Vector3(0, 2.3, 0)
 	var bg_mat := StandardMaterial3D.new()
-	bg_mat.albedo_color = Color(0.1, 0.1, 0.1, 0.85)
+	bg_mat.albedo_color = Color(0.05, 0.05, 0.08, 0.9)
 	bg_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 	bg_mat.billboard_mode = BaseMaterial3D.BILLBOARD_ENABLED
 	bg_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	bg_mat.no_depth_test = true
 	bg_mat.render_priority = 10
 	health_bar_bg.material_override = bg_mat
+	health_bar_bg.visible = false
 	add_child(health_bar_bg)
 
 	health_bar_3d = MeshInstance3D.new()
-	var fg_mesh := QuadMesh.new(); fg_mesh.size = Vector2(0.96, 0.10)
+	var fg_mesh := QuadMesh.new(); fg_mesh.size = Vector2(1.0, 0.12)
 	health_bar_3d.mesh = fg_mesh
-	health_bar_3d.position = Vector3(0, 2.3, 0.01)
 	var fg_mat := StandardMaterial3D.new()
 	fg_mat.albedo_color = Color(0.3, 0.9, 0.3)
 	fg_mat.billboard_mode = BaseMaterial3D.BILLBOARD_ENABLED
@@ -124,16 +129,34 @@ func _build_health_bar() -> void:
 	fg_mat.no_depth_test = true
 	fg_mat.render_priority = 11
 	health_bar_3d.material_override = fg_mat
+	health_bar_3d.visible = false
 	add_child(health_bar_3d)
+	_update_health_bar_transform(false)
 	update_health_bar(0.0)
+
+func _update_health_bar_transform(lying: bool) -> void:
+	if health_bar_3d == null or health_bar_bg == null: return
+	if lying:
+		health_bar_bg.position = Vector3(0, 0.9, 1.6)
+		health_bar_3d.position = Vector3(0, 0.9, 1.61)
+	else:
+		health_bar_bg.position = Vector3(0, HEALTH_BAR_HEIGHT, 0)
+		health_bar_3d.position = Vector3(0, HEALTH_BAR_HEIGHT, 0.01)
 
 func update_health_bar(pct: float) -> void:
 	if health_bar_3d == null: return
-	var s = clampf(pct / 100.0, 0.001, 1.0)
-	health_bar_3d.scale.x = s
-	health_bar_3d.position.x = -0.48 * (1.0 - s)
+	var s = clampf(pct / 100.0, 0.0, 1.0)
+	health_bar_3d.scale.x = max(s, 0.001)
+	health_bar_3d.position.x = -0.5 + (0.5 * s)
 	var mat: StandardMaterial3D = health_bar_3d.material_override
-	mat.albedo_color = Color(1.0 - s * 0.7, 0.3 + s * 0.6, 0.3)
+	if s < 0.5:
+		mat.albedo_color = Color(1.0, 0.3 + s * 1.0, 0.15)
+	else:
+		mat.albedo_color = Color(1.0 - (s - 0.5) * 1.4, 0.8 + (s - 0.5) * 0.3, 0.15)
+
+func _set_health_bar_visible(v: bool) -> void:
+	if health_bar_3d: health_bar_3d.visible = v
+	if health_bar_bg: health_bar_bg.visible = v
 
 func _make_box(size: Vector3, pos: Vector3, col: Color) -> MeshInstance3D:
 	var mi := MeshInstance3D.new()
@@ -164,6 +187,10 @@ func _process(delta: float) -> void:
 	_update_facing(delta)
 	if role == Role.PATIENT: _patient_update(delta)
 	else: _staff_update(delta)
+	if role == Role.PATIENT:
+		var on_bed := bed_index >= 0 and state in [State.WAITING_FOR_DOCTOR, State.RECOVERING]
+		_set_health_bar_visible(on_bed)
+		_update_health_bar_transform(_is_lying_down())
 
 func _animate_limbs(delta: float) -> void:
 	var walking := false
@@ -187,21 +214,35 @@ func _update_facing(delta: float) -> void:
 	current_yaw = lerp_angle(current_yaw, target_yaw, TURN_LERP)
 	rotation.y = current_yaw
 
+func _is_lying_down() -> bool:
+	return role == Role.PATIENT and bed_index >= 0 and state in [State.WAITING_FOR_DOCTOR, State.RECOVERING]
+
 func _request_path_to_node(node_id: String) -> void:
 	path_nodes = []; path_index = 0
+	blocked_time = 0.0
 	if game == null or game.nav == null: return
 	if not game.nav.has_node(node_id): return
 	var start_id: String = game.nav.nearest_node_id(position)
 	path_nodes = game.nav.find_path(start_id, node_id)
 	if path_nodes.is_empty() and start_id != node_id:
-		position = game.nav.get_pos(node_id)
+		var dest: Vector3 = game.nav.get_pos(node_id)
+		position = Vector3(dest.x, GROUND_Y, dest.z)
+		return
+	if path_nodes.size() > 1:
+		path_nodes.remove_at(0)
+		path_index = 0
 
 func _request_path_to_pos(world_target: Vector3) -> void:
 	path_nodes = []; path_index = 0
+	blocked_time = 0.0
 	if game == null or game.nav == null: return
 	path_nodes = game.get_nav_path(position, world_target)
-	if path_nodes.is_empty():
-		position = world_target
+	if path_nodes.is_empty() and position.distance_to(world_target) > 0.5:
+		position = Vector3(world_target.x, GROUND_Y, world_target.z)
+		return
+	if path_nodes.size() > 1:
+		path_nodes.remove_at(0)
+		path_index = 0
 
 func _path_empty() -> bool:
 	return path_nodes.is_empty() or path_index >= path_nodes.size()
@@ -216,6 +257,7 @@ func _follow_path(delta: float, speed: float) -> bool:
 	_move_toward(target, speed, delta)
 	if Vector2(position.x - target.x, position.z - target.z).length() < ARRIVE_DIST:
 		path_index += 1
+		blocked_time = 0.0
 	return _path_empty()
 
 func _move_toward(target: Vector3, speed: float, delta: float) -> void:
@@ -238,23 +280,85 @@ func _move_toward(target: Vector3, speed: float, delta: float) -> void:
 
 	stuck_timer += delta
 	if position.distance_to(last_pos) < 0.01:
+		blocked_time += delta
 		if stuck_timer > STUCK_TIMEOUT:
 			if not _path_empty(): path_index += 1
 			stuck_timer = 0.0
+			blocked_time = 0.0
+		if blocked_time >= BLOCKED_TELEPORT_TIME:
+			_teleport_to_path_end()
 	else:
 		stuck_timer = 0.0
+		blocked_time = 0.0
 	last_pos = position
+
+func _teleport_to_path_end() -> void:
+	if _path_empty(): return
+	var last_id: String = path_nodes[path_nodes.size() - 1]
+	var dest: Vector3 = game.nav.get_pos(last_id)
+	position = Vector3(dest.x, GROUND_Y, dest.z)
+	path_index = path_nodes.size()
+	blocked_time = 0.0
+	stuck_timer = 0.0
+	velocity = Vector3.ZERO
+
+func _snap_onto_bed() -> void:
+	if bed_index < 0: return
+	var bed_world: Vector3 = game.get_bed_position(bed_index)
+	position = Vector3(bed_world.x, BED_LIE_Y, bed_world.z)
+	target_yaw = PI
+	current_yaw = PI
+	rotation = Vector3(deg_to_rad(90), PI, 0.0)
+	pivot_l.rotation = Vector3.ZERO
+	pivot_r.rotation = Vector3.ZERO
+	pivot_al.rotation = Vector3.ZERO
+	pivot_ar.rotation = Vector3.ZERO
+	velocity = Vector3.ZERO
+	collision_mask = 0
+
+func _stand_up_from_bed() -> void:
+	rotation = Vector3.ZERO
+	target_yaw = 0.0
+	current_yaw = 0.0
+	var bed_world: Vector3 = game.get_bed_position(bed_index)
+	position = Vector3(bed_world.x + 1.4, GROUND_Y, bed_world.z)
+	velocity = Vector3.ZERO
+	collision_mask = 1 | 4
+
+func _pin_to_bed() -> void:
+	if bed_index < 0: return
+	var bed_world: Vector3 = game.get_bed_position(bed_index)
+	position = Vector3(bed_world.x, BED_LIE_Y, bed_world.z)
+	velocity = Vector3.ZERO
 
 func _patient_update(delta: float) -> void:
 	match state:
 		State.ARRIVING:
-			if _path_empty(): _request_path_to_node("entrance_out")
+			if _path_empty():
+				if position.distance_to(game.nav.get_pos("entrance_out")) < 1.5:
+					state = State.AT_RECEPTION
+					_request_path_to_node("reception")
+				else:
+					_request_path_to_node("entrance_out")
+				return
 			if _follow_path(delta, WALK_SPEED):
 				if position.distance_to(game.nav.get_pos("entrance_out")) < 1.5:
 					state = State.AT_RECEPTION
 					_request_path_to_node("reception")
 		State.AT_RECEPTION:
-			if _path_empty(): _request_path_to_node("reception")
+			if _path_empty():
+				if position.distance_to(game.nav.get_pos("reception")) < 1.5:
+					var idx: int = game.request_bed(self)
+					if idx >= 0:
+						bed_index = idx
+						state = State.GOING_TO_ROOM
+						_request_path_to_node("bed_%d" % bed_index)
+					else:
+						state = State.LEAVING
+						_request_path_to_node("entrance_out")
+				else:
+					_request_path_to_node("reception")
+				return
 			if _follow_path(delta, WALK_SPEED):
 				var idx: int = game.request_bed(self)
 				if idx >= 0:
@@ -265,14 +369,32 @@ func _patient_update(delta: float) -> void:
 					state = State.LEAVING
 					_request_path_to_node("entrance_out")
 		State.GOING_TO_ROOM:
-			if _path_empty(): _request_path_to_node("bed_%d" % bed_index)
+			if _path_empty():
+				if bed_index >= 0 and position.distance_to(game.get_bed_position(bed_index)) < 2.5:
+					_snap_onto_bed()
+					state = State.WAITING_FOR_DOCTOR
+				else:
+					_request_path_to_node("bed_%d" % bed_index)
+				return
 			if _follow_path(delta, WALK_SPEED):
-				position = game.get_bed_position(bed_index) + Vector3(1.4, 0, 0)
+				_snap_onto_bed()
 				state = State.WAITING_FOR_DOCTOR
-		State.WAITING_FOR_DOCTOR: pass
-		State.RECOVERING: pass
+		State.WAITING_FOR_DOCTOR:
+			_pin_to_bed()
+		State.RECOVERING:
+			_pin_to_bed()
 		State.LEAVING:
-			if _path_empty(): _request_path_to_node("entrance_out")
+			if rotation.x != 0.0:
+				_stand_up_from_bed()
+				_request_path_to_node("entrance_out")
+				return
+			if _path_empty():
+				if position.distance_to(game.nav.get_pos("entrance_out")) > 2.5:
+					_request_path_to_node("entrance_out")
+				else:
+					game.unregister_patient(self)
+					queue_free()
+				return
 			if _follow_path(delta, WALK_SPEED):
 				if position.distance_to(game.nav.get_pos("entrance_out")) < 2.5:
 					game.unregister_patient(self); queue_free()
@@ -283,6 +405,22 @@ func _staff_update(delta: float) -> void:
 			state = State.WORKING
 			treating_patient = null
 			work_timer = 0.0
+			_pick_staff_destination()
+			return
+		# Stay at the bedside until the patient is at least half healed.
+		var prog: float = float(treating_patient.get_meta("progress"))
+		if prog >= HEAL_ATTEND_THRESHOLD:
+			# Release and go find other work.
+			treating_patient = null
+			state = State.WORKING
+			work_timer = 0.0
+			_pick_staff_destination()
+			return
+		# Pin beside the bed while attending.
+		var bed_pos: Vector3 = treating_patient.position
+		position = Vector3(bed_pos.x + 1.2, GROUND_Y, bed_pos.z + 0.8)
+		velocity = Vector3.ZERO
+		target_yaw = atan2(bed_pos.x - position.x, bed_pos.z - position.z)
 		return
 	work_timer += delta
 	if _path_empty():
@@ -294,7 +432,8 @@ func _staff_update(delta: float) -> void:
 
 func _pick_staff_destination() -> void:
 	if game == null: return
-	if role == Role.DOCTOR:
+	# Both doctors and nurses can attend a patient waiting for care.
+	if role in [Role.DOCTOR, Role.NURSE]:
 		var p = game.get_patient_needing_doctor()
 		if p != null:
 			state = State.TREATING
